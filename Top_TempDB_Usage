@@ -1,0 +1,48 @@
+/********************************************************************************************
+ Script:   Top_TempDB_Usage.sql
+ Author:   MS
+ Purpose:  Identify top TempDB-consuming tasks in SQL Server for performance monitoring.
+
+ Description:
+   - Uses sys.dm_db_task_space_usage to find allocated and deallocated TempDB pages per task
+   - Joins with sys.dm_exec_requests to get executing requests
+   - Extracts SQL text for each active task
+   - Highlights tasks consuming the most TempDB space
+   - Useful for identifying problematic queries causing TempDB contention or growth issues
+
+ Usage:
+   - Run in SQL Server Management Studio (SSMS)
+   - Requires appropriate permissions (VIEW SERVER STATE)
+********************************************************************************************/
+
+SET NOCOUNT ON   -- Suppress row count messages
+
+-- Marker for output readability
+PRINT '-- TempDBUsage'
+
+-- Query top TempDB-consuming tasks
+SELECT TOP 10
+     t1.session_id,   -- Session ID consuming TempDB
+     t1.request_id,   -- Request ID for the session
+     t1.task_alloc,   -- Total pages allocated for this task
+     t1.task_dealloc, -- Total pages deallocated for this task
+     t2.plan_handle,  -- Plan handle for the executing query
+     -- Extract SQL text for the query
+     (SELECT SUBSTRING(text, t2.statement_start_offset/2 + 1,
+        (CASE WHEN statement_end_offset = -1
+           THEN LEN(CONVERT(NVARCHAR(MAX), text)) * 2
+           ELSE statement_end_offset
+        END - t2.statement_start_offset)/2)
+     FROM sys.dm_exec_sql_text(sql_handle)) AS query_text
+FROM 
+    -- Aggregate TempDB allocation/deallocation per session/task
+    (SELECT session_id, request_id,
+            SUM(internal_objects_alloc_page_count + user_objects_alloc_page_count) AS task_alloc,
+            SUM(internal_objects_dealloc_page_count + user_objects_dealloc_page_count) AS task_dealloc
+     FROM sys.dm_db_task_space_usage
+     GROUP BY session_id, request_id) AS t1
+JOIN sys.dm_exec_requests AS t2
+    ON t1.session_id = t2.session_id
+   AND t1.request_id = t2.request_id
+WHERE t1.session_id > 50  -- Exclude system sessions
+ORDER BY t1.task_alloc DESC -- Show top consumers first
