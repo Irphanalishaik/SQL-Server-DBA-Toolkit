@@ -1,0 +1,58 @@
+/********************************************************************************************
+ Script:   Top_Expensive_Queries.sql
+ Author:  MS
+ Purpose:  Identify high-cost SQL statements in the plan cache for optimization purposes.
+
+ Description:
+   - Uses sys.dm_exec_query_stats to analyze query execution statistics
+   - Joins with sys.dm_exec_sql_text to get query text
+   - Joins with sys.dm_exec_query_plan to get plan information
+   - Highlights queries with high logical reads, high execution count, or long run times
+   - Adapts output based on SQL Server version (query_hash and plan_hash for versions > 9)
+   - Useful for performance tuning and identifying optimization candidates
+
+ Usage:
+   - Run in SSMS with appropriate permissions (VIEW SERVER STATE)
+   - Outputs top 500 queries by execution count, including metrics like:
+       * AverageLogicalReads
+       * AverageRunTimeSeconds
+       * Execution count
+       * SQL snippet
+********************************************************************************************/
+
+SET NOCOUNT ON   -- Suppress row count messages
+
+-- Get SQL Server version
+DECLARE @ProductVersion NVARCHAR(128)
+SET @ProductVersion = CAST(SERVERPROPERTY('ProductVersion') AS NVARCHAR(128))
+
+-- Only run for SQL Server versions greater than 2000
+IF CAST(LEFT(@ProductVersion, CHARINDEX('.',@ProductVersion)-1) AS INT) > 8
+BEGIN
+    -- Pick a database that is not in SQL Server 2000 compatibility mode
+    DECLARE @DBContext SYSNAME, @SQL NVARCHAR(MAX)
+    SELECT TOP 1 @DBContext = name 
+    FROM sys.databases
+    WHERE compatibility_level > 80
+
+    -- Build dynamic SQL for top expensive queries
+    SET @SQL = N' USE [' + @DBContext + ']
+    SELECT TOP 500
+        AverageLogicalReads = total_logical_reads / execution_count,
+        AverageRunTimeSeconds = (total_elapsed_time / 1000000.0) / execution_count,
+        execution_count,
+        last_worker_time,
+        last_physical_reads,
+        total_logical_writes,
+        last_logical_writes,
+        last_logical_reads,
+        last_elapsed_time'
+
+    -- Include query_hash and plan_hash for SQL Server 2005+
+    SET @SQL = @SQL + 
+        CASE WHEN CAST(LEFT(@ProductVersion, CHARINDEX('.',@ProductVersion)-1) AS INT) > 9
+        THEN ', query_hash, query_plan_hash' ELSE '' END + '
+        , sql_handle,
+        StatementText = LEFT((
+            REPLACE(REPLACE((
+                SUBSTRING(text, statement_start_offset / 2 + 1,
